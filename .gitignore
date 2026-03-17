@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+env/
+venv/
+
+# Environment variables — NEVER commit these
+Backend/.env
+.env
+
+# Docker
+.dockerignore
+
+# Node
+Frontend/node_modules/
+Frontend/.cache/
+
+# Logs
+*.log
+current_output_log.txt
+
+# VS Code
+.vscode/
+
+# Test/dev files
+Backend/audio_test.py
+Backend/list_devices.py
+Backend/setup_devices.py
+Backend/stt_test.py
+Backend/test_device_8.py
+Backend/test.py
+Backend/API_key.py
+Backend/credentials.txt
+Backend/realtime_whisper_stt_env.py
+utterances/

@@ -1,0 +1,64 @@
+# services:
+
+#   # ── Backend: FastAPI + Interview Bot ────────────────────────────────────────
+#   backend:
+#     build: ./Backend
+#     container_name: int-avatar-bot
+#     restart: unless-stopped
+#     env_file:
+#       - ./Backend/.env
+#     shm_size: "2gb"
+#     ipc: host
+#     ports:
+#        - "4001:8000"    # FastAPI → open browser at :4001
+#        - "4002:6080"    # noVNC  → open browser at :4002
+#     environment:
+#       - DISPLAY=:99
+#       - PULSE_SERVER=unix:/var/run/pulse/native
+
+#   # ── Frontend: React built → served by Nginx ──────────────────────────────
+#   frontend:
+#     image: nginx:alpine
+#     container_name: int-frontend
+#     restart: unless-stopped
+#     ports:
+#       - "4003:80"
+#     volumes:
+#       - ./Frontend/dist:/usr/share/nginx/html:ro
+#       - ./nginx.conf:/etc/nginx/conf.d/default.conf   # ← no :ro, nginx needs to read it
+#     depends_on:
+#       - backend
+
+
+services:
+
+  # ── Backend: FastAPI + Interview Bot ────────────────────────────────────────
+  backend:
+    build: ./Backend
+    container_name: int-avatar-bot
+    restart: unless-stopped
+    env_file:
+      - ./Backend/.env
+    shm_size: "2gb"
+    ipc: host
+    ports:
+      - "4001:8000"    # FastAPI → open browser at :4001
+      - "4002:6080"    # noVNC  → open browser at :4002
+    environment:
+      - DISPLAY=:99
+      - PULSE_SERVER=unix:/var/run/pulse/native
+      - PULSE_SINK=VirtualMic
+      - PULSE_SOURCE=VirtualMicSource
+
+  # ── Frontend: React built → served by Nginx ──────────────────────────────
+  frontend:
+    image: nginx:alpine
+    container_name: int-frontend
+    restart: unless-stopped
+    ports:
+      - "4003:80"
+    volumes:
+      - ./Frontend/dist:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - backend
