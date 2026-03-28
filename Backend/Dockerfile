@@ -32,28 +32,41 @@ RUN apt-get update && apt-get install -y \
     wget \
     curl \
     ca-certificates \
+    gnupg \
     build-essential \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Update CA certificates (fixes SSL errors with external WebSocket APIs) ────
-RUN update-ca-certificates
-
-# ── Tell ALSA to use PulseAudio as default device ─────────────────────────────
-# This makes Chrome automatically route audio through PulseAudio
-RUN echo 'pcm.!default {\n    type pulse\n}\nctl.!default {\n    type pulse\n}' \
-    > /etc/asound.conf
-
-
 
 RUN apt-get update && apt-get install -y \
-    v4l2loopback-dkms \
-    v4l-utils \
-    ffmpeg \
-    kmod
+    x11vnc \
+    novnc \
+    websockify \
+    && rm -rf /var/lib/apt/lists/*
 
 
 
+
+
+
+# Update CA certificates
+RUN update-ca-certificates
+
+# Tell ALSA to use PulseAudio as default device
+RUN echo 'pcm.!default {\n    type pulse\n}\nctl.!default {\n    type pulse\n}' > /etc/asound.conf
+
+# Install Google Chrome Stable
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+    | gpg --dearmor -o /usr/share/keyrings/google-linux.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
+    > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
+
+# NOTE:
+# If v4l2loopback-dkms is already installed on the host, do not install it here.
+# Kernel modules should usually be handled on the host, not inside the container.
 
 WORKDIR /app
 

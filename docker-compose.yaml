@@ -1,18 +1,16 @@
 services:
-
   # ── Backend: FastAPI + Interview Bot ────────────────────────────────────────
   backend:
     build: ./Backend
     container_name: int-avatar-bot
-    restart: unless-stopped
-    privileged: true          # ← ADD THIS
+    privileged: true
     env_file:
       - ./Backend/.env
     shm_size: "2gb"
     ipc: host
     ports:
-      - "4001:8000"    # FastAPI → open browser at :4001
-      - "4002:6080"    # noVNC  → open browser at :4002
+      - "4002:8000"    # FastAPI backend
+      - "4003:6080"    # noVNC
     environment:
       - DISPLAY=:99
       - PULSE_SERVER=unix:/var/run/pulse/native
@@ -23,11 +21,10 @@ services:
   frontend:
     image: nginx:alpine
     container_name: int-frontend
-    restart: unless-stopped
     ports:
-      - "4003:80"
+      - "4001:80"      # Frontend
     volumes:
       - ./Frontend/dist:/usr/share/nginx/html:ro
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - backend
