@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """
-join_meet.py — Google Meet joiner using Raw Playwright (mic only, no camera)
+join_meet.py — Google Meet joiner using Playwright (mic only, no camera)
 
 EXIT POLICY:
   The bot ONLY leaves the meeting when:
-    1. api.py calls /stop → terminates main.py process → SIGTERM received
+    1. api.py calls /stop → terminates main.py → CancelledError propagates here
     2. stay_duration seconds have elapsed (safety timeout)
-
-  The bot does NOT exit due to:
-    - asyncio.CancelledError from task management
-    - STT failures or restarts
-    - Any internal errors
 """
 
 import asyncio
 import os
+import subprocess
 import sys
 
 from dotenv import load_dotenv
@@ -24,14 +20,41 @@ load_dotenv()
 
 os.environ["DISPLAY"] = ":99"
 os.environ["PULSE_SERVER"] = "unix:/var/run/pulse/native"
-os.environ["PULSE_SOURCE"] = "VirtualMicSource"
-os.environ["PULSE_SINK"] = "VirtualSpeaker"
+
+# ── Per-session PulseAudio routing ────────────────────────────────────────────
+#
+# Audio routing layout:
+#   Chrome MIC  reads from : VMicSrc_{sid}     ← PULSE_MIC_SOURCE
+#   Chrome SPK  writes to  : VSpk_{sid}        ← PULSE_SPK_SINK (default sink)
+#   TTS paplay  writes to  : VMic_{sid}        (explicit --device, not default)
+#   realtime.py reads from : VSpk_{sid}.monitor
+#
+# Default sink MUST be VSpk (speaker), NOT VMic (mic/TTS).
+
+_PULSE_SOURCE   = os.getenv("PULSE_MIC_SOURCE") or "VirtualMicSource"
+_PULSE_SPK_SINK = os.getenv("PULSE_SPK_SINK")   or "VirtualSpeaker"
+
+os.environ["PULSE_SOURCE"] = _PULSE_SOURCE
+os.environ["PULSE_SINK"]   = _PULSE_SPK_SINK
+
+
+def _set_pulse_defaults():
+    try:
+        subprocess.run(["pactl", "set-default-source", _PULSE_SOURCE],
+                       capture_output=True, timeout=5)
+        subprocess.run(["pactl", "set-default-sink", _PULSE_SPK_SINK],
+                       capture_output=True, timeout=5)
+        print(f"[AUDIO] ✅ PulseAudio defaults set:", flush=True)
+        print(f"[AUDIO]    Source (Chrome mic) : {_PULSE_SOURCE}", flush=True)
+        print(f"[AUDIO]    Sink   (Chrome spk) : {_PULSE_SPK_SINK}", flush=True)
+        print(f"[AUDIO]    TTS sink (explicit)  : {os.getenv('PULSE_MIC_SINK','VMic')} via paplay --device", flush=True)
+    except Exception as e:
+        print(f"[AUDIO] ⚠️  Could not set PulseAudio defaults: {e}", flush=True)
 
 
 async def _click_use_microphone(page) -> bool:
     try:
-        result = await page.evaluate(
-            """
+        result = await page.evaluate("""
             () => {
                 const buttons = Array.from(document.querySelectorAll('button'));
                 for (const btn of buttons) {
@@ -45,8 +68,7 @@ async def _click_use_microphone(page) -> bool:
                 }
                 return null;
             }
-        """
-        )
+        """)
         if result:
             print(f"[MIC]  ✅ Clicked: '{result}'", flush=True)
             return True
@@ -57,8 +79,7 @@ async def _click_use_microphone(page) -> bool:
 
 async def _click_join_button(page) -> bool:
     try:
-        result = await page.evaluate(
-            """
+        result = await page.evaluate("""
             () => {
                 const buttons = Array.from(document.querySelectorAll('button'));
                 for (const btn of buttons) {
@@ -70,8 +91,7 @@ async def _click_join_button(page) -> bool:
                 }
                 return null;
             }
-        """
-        )
+        """)
         if result:
             print(f"[JOIN] ✅ Clicked: '{result}'", flush=True)
             return True
@@ -82,8 +102,7 @@ async def _click_join_button(page) -> bool:
 
 async def _click_switch_here(page) -> bool:
     try:
-        result = await page.evaluate(
-            """
+        result = await page.evaluate("""
             () => {
                 const buttons = Array.from(document.querySelectorAll('button'));
                 for (const btn of buttons) {
@@ -95,8 +114,7 @@ async def _click_switch_here(page) -> bool:
                 }
                 return null;
             }
-        """
-        )
+        """)
         if result:
             print(f"[JOIN] 🔁 Clicked: '{result}'", flush=True)
             return True
@@ -107,8 +125,7 @@ async def _click_switch_here(page) -> bool:
 
 async def _dismiss_popups(page):
     try:
-        await page.evaluate(
-            """
+        await page.evaluate("""
             () => {
                 for (const sel of [
                     '[aria-label="Close dialog"]',
@@ -119,26 +136,59 @@ async def _dismiss_popups(page):
                     if (btn) btn.click();
                 }
             }
-        """
-        )
+        """)
     except Exception:
         pass
 
 
 async def _get_mic_state(page) -> str:
     try:
-        return await page.evaluate(
-            """
+        return await page.evaluate("""
             () => {
                 if (document.querySelector('[aria-label*="Turn off microphone"]')) return 'MIC_ON';
                 if (document.querySelector('[aria-label*="Turn on microphone"]'))  return 'MIC_OFF';
                 if (document.querySelector('[aria-label*="Microphone problem"]'))  return 'MIC_PROBLEM';
                 return 'UNKNOWN';
             }
-        """
-        )
+        """)
     except Exception:
         return "UNKNOWN"
+
+
+async def _click_leave_button(page) -> bool:
+    try:
+        result = await page.evaluate("""
+            () => {
+                const leaveSelectors = [
+                    '[aria-label="Leave call"]',
+                    '[aria-label="Leave meeting"]',
+                    '[data-tooltip="Leave call"]',
+                ];
+                for (const sel of leaveSelectors) {
+                    const btn = document.querySelector(sel);
+                    if (btn) { btn.click(); return sel; }
+                }
+                const buttons = Array.from(document.querySelectorAll('button'));
+                for (const btn of buttons) {
+                    const txt = (btn.textContent || '').trim().toLowerCase();
+                    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+                    if (txt.includes('leave') || label.includes('leave')) {
+                        btn.click();
+                        return btn.getAttribute('aria-label') || btn.textContent.trim();
+                    }
+                }
+                return null;
+            }
+        """)
+        if result:
+            print(f"[JOIN] 👋 Clicked Leave: '{result}'", flush=True)
+            await page.wait_for_timeout(1500)
+            return True
+        else:
+            print("[JOIN] ⚠️  Leave button not found — closing Chrome directly.", flush=True)
+    except Exception as e:
+        print(f"[JOIN] ⚠️  Leave click error: {e}", flush=True)
+    return False
 
 
 async def _google_login_required(page) -> bool:
@@ -146,27 +196,16 @@ async def _google_login_required(page) -> bool:
         url = (page.url or "").lower()
         if "accounts.google.com" in url or "servicelogin" in url or "challenge" in url:
             return True
-
         if await page.locator('input[type="email"]').count() > 0:
             return True
         if await page.locator('input[type="password"]').count() > 0:
             return True
-
         body_text = ""
         try:
             body_text = (await page.locator("body").inner_text(timeout=3000)).lower()
         except Exception:
             pass
-
-        hints = [
-            "sign in",
-            "verify",
-            "challenge",
-            "2-step",
-            "two-step",
-            "use your phone",
-            "tap yes",
-        ]
+        hints = ["sign in", "verify", "challenge", "2-step", "two-step", "use your phone", "tap yes"]
         return any(h in body_text for h in hints)
     except Exception:
         return False
@@ -175,49 +214,46 @@ async def _google_login_required(page) -> bool:
 async def _wait_for_manual_login(page, timeout_seconds: int) -> None:
     if timeout_seconds <= 0:
         return
-
-    print("\n[LOGIN] ── Manual login window ─────────────────────────", flush=True)
-    print("[LOGIN] Use the VNC browser to sign in to Google manually.", flush=True)
-    print("[LOGIN] Complete 2-Step Verification on your phone if prompted.", flush=True)
-    print(f"[LOGIN] Waiting up to {timeout_seconds}s before continuing...", flush=True)
-
+    print("\n[LOGIN] Use the VNC browser to sign in to Google manually.", flush=True)
+    print(f"[LOGIN] Waiting up to {timeout_seconds}s...", flush=True)
     elapsed = 0
     while elapsed < timeout_seconds:
         if not await _google_login_required(page):
             print("[LOGIN] ✅ Login no longer required. Continuing.", flush=True)
             return
-
         await asyncio.sleep(5)
         elapsed += 5
-        remaining = max(timeout_seconds - elapsed, 0)
-        print(f"[LOGIN]   {remaining}s remaining...", flush=True)
-
+        print(f"[LOGIN]   {max(timeout_seconds - elapsed, 0)}s remaining...", flush=True)
     print("[LOGIN] ⚠️  Login wait timeout reached. Continuing anyway.", flush=True)
 
 
 async def run_meet(joined_event: asyncio.Event = None):
-    meeting_link = os.getenv("MEETING_LINK", "").strip()
-    stay_duration = int(os.getenv("STAY_DURATION_SECONDS", "7200"))
-    chrome_user_data_dir = os.getenv("CHROME_USER_DATA_DIR", "/tmp/chrome-profile")
+    meeting_link      = os.getenv("MEETING_LINK", "").strip()
+    stay_duration     = int(os.getenv("STAY_DURATION_SECONDS", "7200"))
+    chrome_profile    = os.getenv("CHROME_USER_DATA_DIR", "/tmp/chrome-profile")
     manual_login_wait = int(os.getenv("MANUAL_LOGIN_WAIT_SECONDS", "0"))
 
     if not meeting_link:
         print("❌  MEETING_LINK not set in .env", file=sys.stderr)
         sys.exit(1)
 
-    if not meeting_link.startswith("http://") and not meeting_link.startswith("https://"):
+    if not meeting_link.startswith("http"):
         meeting_link = "https://" + meeting_link
 
-    print(f"🚀 Joining  : {meeting_link}")
-    print(f"⏳ Duration : {stay_duration}s ({stay_duration // 60} min)")
-    print(f"🎙️  Mic      : VirtualMicSource → Chrome → Meet")
-    print(f"👤 Profile  : {chrome_user_data_dir}")
+    _set_pulse_defaults()
+
+    print(f"🚀 Joining  : {meeting_link}", flush=True)
+    print(f"⏳ Duration : {stay_duration}s ({stay_duration // 60} min)", flush=True)
+    print(f"🎙️  Mic src  : {_PULSE_SOURCE} → Chrome → Meet", flush=True)
+    print(f"🔊 Spk sink : {_PULSE_SPK_SINK}", flush=True)   # ← BUG FIX: was _PULSE_SINK
+    print(f"👤 Profile  : {chrome_profile}", flush=True)
 
     async with async_playwright() as p:
         context = None
+        page = None
         try:
             context = await p.chromium.launch_persistent_context(
-                user_data_dir=chrome_user_data_dir,
+                user_data_dir=chrome_profile,
                 headless=False,
                 viewport={"width": 1280, "height": 720},
                 args=[
@@ -240,14 +276,9 @@ async def run_meet(joined_event: asyncio.Event = None):
 
             page = await context.new_page()
 
-            # Open Meet first.
             print("\n[JOIN] ── Step 1: Opening Meet ─────────────────────────", flush=True)
             try:
-                await page.goto(
-                    meeting_link,
-                    wait_until="domcontentloaded",
-                    timeout=30000,
-                )
+                await page.goto(meeting_link, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(4000)
                 print(f"[JOIN] Meet loaded: {page.url}", flush=True)
             except PlaywrightTimeout:
@@ -256,25 +287,17 @@ async def run_meet(joined_event: asyncio.Event = None):
                 print(f"[JOIN] ❌ Failed to open Meet: {e}", file=sys.stderr)
                 sys.exit(1)
 
-            # If Google login/challenge appears, wait only as long as needed.
             if await _google_login_required(page):
-                print("\n[LOGIN] Google sign-in/challenge detected.", flush=True)
+                print("\n[LOGIN] Google sign-in detected.", flush=True)
                 await _wait_for_manual_login(page, manual_login_wait)
-
-                print("\n[JOIN] ── Re-opening Meet after login ───────────────────", flush=True)
                 try:
-                    await page.goto(
-                        meeting_link,
-                        wait_until="domcontentloaded",
-                        timeout=30000,
-                    )
+                    await page.goto(meeting_link, wait_until="domcontentloaded", timeout=30000)
                     await page.wait_for_timeout(4000)
                     print(f"[JOIN] Meet loaded after login: {page.url}", flush=True)
                 except Exception as e:
                     print(f"[JOIN] ❌ Failed to reopen Meet after login: {e}", file=sys.stderr)
                     sys.exit(1)
 
-            # If Meet shows switch prompt, handle it.
             print("\n[JOIN] ── Step 2: Checking for switch prompt ───────────", flush=True)
             for attempt in range(4):
                 await page.wait_for_timeout(1500)
@@ -283,7 +306,6 @@ async def run_meet(joined_event: asyncio.Event = None):
                     break
                 print(f"[JOIN] Switch prompt not visible (attempt {attempt+1}/4)", flush=True)
 
-            # Pre-join mic popup.
             print("\n[JOIN] ── Step 3: Pre-join mic popup ───────────────────", flush=True)
             for attempt in range(6):
                 await page.wait_for_timeout(1500)
@@ -292,38 +314,31 @@ async def run_meet(joined_event: asyncio.Event = None):
                     break
                 print(f"[JOIN] Mic popup not visible (attempt {attempt+1}/6)", flush=True)
 
-            # Join meeting.
             print("\n[JOIN] ── Step 4: Joining meeting ──────────────────────", flush=True)
             joined = False
             for attempt in range(10):
                 await page.wait_for_timeout(2000)
-
                 if await _click_join_button(page):
                     joined = True
                     await page.wait_for_timeout(3000)
                     break
-
                 if attempt == 2:
                     try:
-                        btns = await page.evaluate(
-                            """
+                        btns = await page.evaluate("""
                             () => Array.from(document.querySelectorAll('button'))
                                 .map(b => (b.textContent||'').trim() + ' | ' + (b.getAttribute('aria-label')||''))
                                 .filter(s => s.trim() !== ' | ')
                                 .slice(0, 15)
                                 .join(' || ')
-                        """
-                        )
+                        """)
                         print(f"[JOIN] Visible buttons: {btns}", flush=True)
                     except Exception:
                         pass
-
                 print(f"[JOIN] Join button not found (attempt {attempt+1}/10)", flush=True)
 
             if not joined:
                 print("[JOIN] ⚠️  Could not click join — may already be inside", flush=True)
 
-            # Post-join mic popup.
             print("\n[JOIN] ── Step 5: Post-join mic popup ──────────────────", flush=True)
             for attempt in range(5):
                 await page.wait_for_timeout(1500)
@@ -334,7 +349,6 @@ async def run_meet(joined_event: asyncio.Event = None):
             await page.wait_for_timeout(1000)
             await _dismiss_popups(page)
 
-            # Verify mic state.
             print("\n[JOIN] ── Step 6: Verifying mic state ──────────────────", flush=True)
             await page.wait_for_timeout(2000)
             state = await _get_mic_state(page)
@@ -351,22 +365,14 @@ async def run_meet(joined_event: asyncio.Event = None):
             final = await _get_mic_state(page)
             if final == "MIC_ON":
                 print("[JOIN] ══════════════════════════════════════════", flush=True)
-                print("[JOIN] ✅ MIC IS ON — Alex's voice will be heard!", flush=True)
+                print("[JOIN] ✅ MIC IS ON — bot's voice will be heard!", flush=True)
                 print("[JOIN] ══════════════════════════════════════════", flush=True)
             else:
                 print(f"[JOIN] ⚠️  Mic state: {final} — check noVNC", flush=True)
 
-            # Audio routing check.
             print("\n[JOIN] ── Step 7: Audio routing check ──────────────────", flush=True)
             try:
-                import subprocess
-
-                result = subprocess.run(
-                    ["pactl", "info"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
+                result = subprocess.run(["pactl", "info"], capture_output=True, text=True, timeout=5)
                 for line in result.stdout.splitlines():
                     if "Default Source" in line or "Default Sink" in line:
                         print(f"[AUDIO] {line.strip()}", flush=True)
@@ -385,11 +391,9 @@ async def run_meet(joined_event: asyncio.Event = None):
                 try:
                     await asyncio.sleep(5)
                     elapsed += 5
-
                     if page.is_closed():
                         print("[JOIN] ⚠️  Page closed unexpectedly.", flush=True)
                         break
-
                 except asyncio.CancelledError:
                     print("[JOIN] 🛑 Stop signal received — leaving meeting.", flush=True)
                     raise
@@ -405,6 +409,13 @@ async def run_meet(joined_event: asyncio.Event = None):
             raise
 
         finally:
+            if page and not page.is_closed():
+                print("[JOIN] 👋 Clicking Leave Call...", flush=True)
+                try:
+                    await _click_leave_button(page)
+                except Exception:
+                    pass
+
             if context:
                 try:
                     await context.close()

@@ -34,3 +34,8 @@ Backend/API_key.py
 Backend/credentials.txt
 Backend/realtime_whisper_stt_env.py
 utterances/
+
+
+
+Backend/token.json
+Backend/credentials.json

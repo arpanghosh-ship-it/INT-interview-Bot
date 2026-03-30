@@ -1,22 +1,3 @@
-# browser-use
-# playwright
-# openai>=1.0.0
-# langchain-openai
-# cartesia
-# requests>=2.31
-# numpy>=1.24
-# sounddevice>=0.4.6
-# soundfile
-# python-dotenv>=1.0
-# fastapi
-# numpy
-# sounddevice
-# dotenv
-
-
-
-
-
 browser-use
 playwright
 openai>=1.0.0
@@ -31,3 +12,27 @@ soundfile
 python-dotenv>=1.0
 fastapi
 uvicorn
+
+
+
+
+
+
+# ── Core bot dependencies ─────────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+python-dotenv
+playwright
+openai
+requests
+numpy
+pydub
+pyaudio
+
+# ── Cartesia TTS ──────────────────────────────────────────────────────────────
+cartesia
+
+# ── Google Calendar API (for auto-creating Meet links) ────────────────────────
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

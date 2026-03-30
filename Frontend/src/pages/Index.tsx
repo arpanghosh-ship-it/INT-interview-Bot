@@ -7,8 +7,10 @@ const API = "/api";
 const Index = () => {
   const [state, setState] = useState<AppState>("form");
   const [meetLink, setMeetLink] = useState("");
+  const [sessionId, setSessionId] = useState("");       // ← tracks this tab's session
   const [error, setError] = useState("");
   const [generatedPersona, setGeneratedPersona] = useState("");
+  const [launchStatus, setLaunchStatus] = useState("");
 
   // Interview detail fields
   const [interviewerName, setInterviewerName] = useState("Alex");
@@ -18,23 +20,25 @@ const Index = () => {
   const [keyTopics, setKeyTopics] = useState("");
   const [tone, setTone] = useState("Professional");
   const [duration, setDuration] = useState("30");
+  const [candidateEmail, setCandidateEmail] = useState("");
 
-  // Poll /status every 5s while active
+  // Poll /status/{sessionId} every 5s while active — scoped to THIS session
   useEffect(() => {
-    if (state !== "active") return;
+    if (state !== "active" || !sessionId) return;
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API}/status`);
+        const res = await fetch(`${API}/status/${sessionId}`);
         const data = await res.json();
-        if (data.status === "idle") setState("exited");
+        if (data.status === "idle" || data.status === "not_found") {
+          setState("exited");
+        }
       } catch {}
     }, 5000);
     return () => clearInterval(interval);
-  }, [state]);
+  }, [state, sessionId]);
 
-  // ── Step 1: Generate persona only ────────────────────────────────────────
+  // ── Step 1: Generate persona ──────────────────────────────────────────────
   const handleGeneratePersona = async () => {
-    if (!meetLink.trim()) { setError("Please enter a Google Meet link."); return; }
     if (!targetRole.trim()) { setError("Please enter the target role."); return; }
     setError("");
     setState("generating");
@@ -63,19 +67,42 @@ const Index = () => {
     }
   };
 
-  // ── Step 2: Launch bot with (possibly edited) persona ─────────────────────
+  // ── Step 2: Create Meet → Start bot → Get session_id ─────────────────────
   const handleLaunchBot = async () => {
     setState("launching");
+    setLaunchStatus("Creating Google Meet session...");
+
     try {
+      // 2a: Create Meet link (bot = host)
+      const meetRes = await fetch(`${API}/create-meeting`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: `INT Interview — ${targetRole} (${interviewType})`,
+          duration_minutes: parseInt(duration) + 15,
+          candidate_email: candidateEmail.trim() || null,
+        }),
+      });
+      if (!meetRes.ok) {
+        const errData = await meetRes.json().catch(() => ({ detail: `Server error ${meetRes.status}` }));
+        throw new Error(errData.detail || `Failed to create meeting (${meetRes.status})`);
+      }
+      const { meet_link } = await meetRes.json();
+      setMeetLink(meet_link);
+
+      // 2b: Start the bot — get back a unique session_id for this interview
+      setLaunchStatus("Launching bot into meeting...");
       const startRes = await fetch(`${API}/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ meetLink: meetLink.trim(), persona: generatedPersona }),
+        body: JSON.stringify({ meetLink: meet_link, persona: generatedPersona }),
       });
       if (!startRes.ok) {
         const err = await startRes.json().catch(() => ({ detail: `Server error ${startRes.status}` }));
         throw new Error(err.detail || `Server error ${startRes.status}`);
       }
+      const { session_id } = await startRes.json();
+      setSessionId(session_id);   // ← store session_id for this browser tab
       setState("active");
     } catch (err: any) {
       setError(`Failed to launch: ${err.message}`);
@@ -83,16 +110,24 @@ const Index = () => {
     }
   };
 
+  // ── Stop only THIS session ────────────────────────────────────────────────
   const handleExit = async () => {
     setState("exiting");
-    try { await fetch(`${API}/stop`, { method: "POST" }); } catch {}
+    try {
+      await fetch(`${API}/stop/${sessionId}`, { method: "POST" });
+    } catch {}
     setState("exited");
   };
 
   const handleReset = () => {
     setMeetLink(""); setError(""); setTargetRole("");
-    setKeyTopics(""); setGeneratedPersona("");
+    setKeyTopics(""); setGeneratedPersona(""); setCandidateEmail("");
+    setLaunchStatus(""); setSessionId("");
     setState("form");
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text).catch(() => {});
   };
 
   // ── Styles ────────────────────────────────────────────────────────────────
@@ -116,166 +151,92 @@ const Index = () => {
       backdropFilter: "blur(20px)",
       boxShadow: "0 25px 60px rgba(0,0,0,0.5)",
     },
-    header: {
-      display: "flex",
-      alignItems: "center",
-      gap: "0.75rem",
-      marginBottom: "0.5rem",
-    },
-    title: {
-      fontSize: "1.7rem",
-      fontWeight: 700,
-      color: "#fff",
-      margin: 0,
-      letterSpacing: "-0.5px",
-    },
-    subtitle: {
-      color: "rgba(255,255,255,0.45)",
-      fontSize: "0.9rem",
-      marginBottom: "2rem",
-      marginTop: "0.25rem",
-    },
+    header: { display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.5rem" },
+    title: { fontSize: "1.7rem", fontWeight: 700, color: "#fff", margin: 0, letterSpacing: "-0.5px" },
+    subtitle: { color: "rgba(255,255,255,0.45)", fontSize: "0.9rem", marginBottom: "2rem", marginTop: "0.25rem" },
     sectionTitle: {
-      color: "rgba(255,255,255,0.5)",
-      fontSize: "0.7rem",
-      fontWeight: 600,
-      letterSpacing: "1.5px",
-      textTransform: "uppercase" as const,
-      marginBottom: "1rem",
-      marginTop: "1.75rem",
+      color: "rgba(255,255,255,0.5)", fontSize: "0.7rem", fontWeight: 600,
+      letterSpacing: "1.5px", textTransform: "uppercase" as const,
+      marginBottom: "1rem", marginTop: "1.75rem",
     },
-    row: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: "0.75rem",
-      marginBottom: "0.75rem",
-    },
+    row: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginBottom: "0.75rem" },
     fieldGroup: { marginBottom: "0.75rem" },
-    label: {
-      display: "block",
-      color: "rgba(255,255,255,0.6)",
-      fontSize: "0.78rem",
-      fontWeight: 500,
-      marginBottom: "0.4rem",
-    },
+    label: { display: "block", color: "rgba(255,255,255,0.6)", fontSize: "0.78rem", fontWeight: 500, marginBottom: "0.4rem" },
     input: {
-      width: "100%",
-      background: "rgba(255,255,255,0.06)",
-      border: "1px solid rgba(255,255,255,0.12)",
-      borderRadius: "10px",
-      padding: "0.65rem 0.9rem",
-      color: "#fff",
-      fontSize: "0.9rem",
-      outline: "none",
-      boxSizing: "border-box" as const,
+      width: "100%", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+      borderRadius: "10px", padding: "0.65rem 0.9rem", color: "#fff", fontSize: "0.9rem",
+      outline: "none", boxSizing: "border-box" as const,
     },
     select: {
-      width: "100%",
-      background: "rgba(255,255,255,0.06)",
-      border: "1px solid rgba(255,255,255,0.12)",
-      borderRadius: "10px",
-      padding: "0.65rem 0.9rem",
-      color: "#fff",
-      fontSize: "0.9rem",
-      outline: "none",
-      cursor: "pointer",
-      boxSizing: "border-box" as const,
+      width: "100%", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+      borderRadius: "10px", padding: "0.65rem 0.9rem", color: "#fff", fontSize: "0.9rem",
+      outline: "none", cursor: "pointer", boxSizing: "border-box" as const,
     },
     textarea: {
-      width: "100%",
-      background: "rgba(255,255,255,0.06)",
-      border: "1px solid rgba(255,255,255,0.12)",
-      borderRadius: "10px",
-      padding: "0.75rem 0.9rem",
-      color: "#fff",
-      fontSize: "0.82rem",
-      fontFamily: "monospace",
-      outline: "none",
-      resize: "vertical" as const,
-      minHeight: "320px",
-      boxSizing: "border-box" as const,
-      lineHeight: 1.6,
+      width: "100%", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+      borderRadius: "10px", padding: "0.75rem 0.9rem", color: "#fff", fontSize: "0.82rem",
+      fontFamily: "monospace", outline: "none", resize: "vertical" as const,
+      minHeight: "320px", boxSizing: "border-box" as const, lineHeight: 1.6,
     },
-    divider: {
-      height: "1px",
-      background: "rgba(255,255,255,0.08)",
-      margin: "1.5rem 0",
-    },
+    divider: { height: "1px", background: "rgba(255,255,255,0.08)", margin: "1.5rem 0" },
     error: {
-      color: "#ff6b6b",
-      fontSize: "0.83rem",
-      marginBottom: "1rem",
-      background: "rgba(255,107,107,0.1)",
-      border: "1px solid rgba(255,107,107,0.2)",
-      borderRadius: "8px",
-      padding: "0.6rem 0.9rem",
+      color: "#ff6b6b", fontSize: "0.83rem", marginBottom: "1rem",
+      background: "rgba(255,107,107,0.1)", border: "1px solid rgba(255,107,107,0.2)",
+      borderRadius: "8px", padding: "0.6rem 0.9rem",
+    },
+    infoNote: {
+      color: "rgba(99,102,241,0.9)", fontSize: "0.78rem",
+      background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.2)",
+      borderRadius: "8px", padding: "0.6rem 0.9rem", marginBottom: "1rem",
     },
     btnPrimary: {
-      width: "100%",
-      background: "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
-      color: "#fff",
-      border: "none",
-      borderRadius: "12px",
-      padding: "0.9rem",
-      fontSize: "0.95rem",
-      fontWeight: 600,
-      cursor: "pointer",
-      marginTop: "1.25rem",
-      letterSpacing: "0.2px",
+      width: "100%", background: "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
+      color: "#fff", border: "none", borderRadius: "12px", padding: "0.9rem",
+      fontSize: "0.95rem", fontWeight: 600, cursor: "pointer", marginTop: "1.25rem", letterSpacing: "0.2px",
     },
     btnExit: {
-      width: "100%",
-      background: "rgba(239,68,68,0.15)",
-      color: "#ef4444",
-      border: "1px solid rgba(239,68,68,0.3)",
-      borderRadius: "12px",
-      padding: "0.9rem",
-      fontSize: "0.95rem",
-      fontWeight: 600,
-      cursor: "pointer",
-      marginTop: "1rem",
+      width: "100%", background: "rgba(239,68,68,0.15)", color: "#ef4444",
+      border: "1px solid rgba(239,68,68,0.3)", borderRadius: "12px", padding: "0.9rem",
+      fontSize: "0.95rem", fontWeight: 600, cursor: "pointer", marginTop: "1rem",
     },
     btnOutline: {
-      width: "100%",
-      background: "rgba(255,255,255,0.04)",
-      color: "rgba(255,255,255,0.6)",
-      border: "1px solid rgba(255,255,255,0.12)",
-      borderRadius: "12px",
-      padding: "0.75rem",
-      fontSize: "0.88rem",
-      fontWeight: 500,
-      cursor: "pointer",
-      marginTop: "0.5rem",
+      width: "100%", background: "rgba(255,255,255,0.04)", color: "rgba(255,255,255,0.6)",
+      border: "1px solid rgba(255,255,255,0.12)", borderRadius: "12px", padding: "0.75rem",
+      fontSize: "0.88rem", fontWeight: 500, cursor: "pointer", marginTop: "0.5rem",
+    },
+    btnCopy: {
+      background: "rgba(99,102,241,0.15)", color: "rgba(99,102,241,0.9)",
+      border: "1px solid rgba(99,102,241,0.3)", borderRadius: "8px", padding: "0.3rem 0.7rem",
+      fontSize: "0.75rem", fontWeight: 600, cursor: "pointer", marginLeft: "0.5rem", flexShrink: 0,
+    },
+    meetLinkBox: {
+      display: "flex", alignItems: "center", background: "rgba(16,185,129,0.08)",
+      border: "1px solid rgba(16,185,129,0.25)", borderRadius: "10px",
+      padding: "0.75rem 0.9rem", marginBottom: "1rem", gap: "0.5rem",
+    },
+    meetLinkText: { color: "#10b981", fontSize: "0.85rem", fontWeight: 600, wordBreak: "break-all" as const, flex: 1 },
+    sessionBadge: {
+      display: "inline-block", background: "rgba(99,102,241,0.1)",
+      border: "1px solid rgba(99,102,241,0.2)", borderRadius: "6px",
+      padding: "0.2rem 0.6rem", fontSize: "0.7rem", color: "rgba(99,102,241,0.7)",
+      fontFamily: "monospace", marginBottom: "1rem",
     },
     statusCenter: { textAlign: "center" as const, padding: "1rem 0" },
     statusIcon: { fontSize: "3rem", marginBottom: "1rem", display: "block" },
     statusTitle: { fontSize: "1.3rem", fontWeight: 700, color: "#fff", marginBottom: "0.5rem" },
     statusSub: { color: "rgba(255,255,255,0.5)", fontSize: "0.9rem", marginBottom: "1.5rem" },
     infoBox: {
-      background: "rgba(255,255,255,0.05)",
-      borderRadius: "10px",
-      padding: "1rem",
-      marginBottom: "1.5rem",
-      textAlign: "left" as const,
-      fontSize: "0.83rem",
+      background: "rgba(255,255,255,0.05)", borderRadius: "10px", padding: "1rem",
+      marginBottom: "1.5rem", textAlign: "left" as const, fontSize: "0.83rem",
     },
     infoRow: { color: "rgba(255,255,255,0.55)", marginBottom: "0.4rem", lineHeight: 1.5 },
     spinnerWrap: { textAlign: "center" as const, padding: "2.5rem 0" },
     spinner: {
-      width: 44,
-      height: 44,
-      border: "3px solid rgba(99,102,241,0.2)",
-      borderTop: "3px solid #6366f1",
-      borderRadius: "50%",
-      animation: "spin 0.8s linear infinite",
-      margin: "0 auto 1.25rem",
+      width: 44, height: 44, border: "3px solid rgba(99,102,241,0.2)",
+      borderTop: "3px solid #6366f1", borderRadius: "50%",
+      animation: "spin 0.8s linear infinite", margin: "0 auto 1.25rem",
     },
-    previewHint: {
-      fontSize: "0.78rem",
-      color: "rgba(255,255,255,0.35)",
-      marginTop: "0.5rem",
-      textAlign: "center" as const,
-    },
+    previewHint: { fontSize: "0.78rem", color: "rgba(255,255,255,0.35)", marginTop: "0.5rem", textAlign: "center" as const },
   };
 
   return (
@@ -293,20 +254,14 @@ const Index = () => {
           <span style={{ fontSize: "1.8rem" }}>🤖</span>
           <h1 style={styles.title}>Interview Bot</h1>
         </div>
-        <p style={styles.subtitle}>Configure your AI interviewer and launch into Google Meet.</p>
+        <p style={styles.subtitle}>Configure your AI interviewer — each session runs independently.</p>
 
         {/* ── FORM ──────────────────────────────────────────────────────────── */}
         {state === "form" && (
           <div style={{ animation: "fadeIn 0.3s ease-out" }}>
-            <div style={styles.fieldGroup}>
-              <label style={styles.label}>📎 Google Meet Link</label>
-              <input
-                style={styles.input}
-                type="url"
-                placeholder="https://meet.google.com/abc-defg-hij"
-                value={meetLink}
-                onChange={(e) => setMeetLink(e.target.value)}
-              />
+            <div style={styles.infoNote}>
+              🔗 A Google Meet link will be <strong>automatically created</strong> when you launch.
+              The bot is the host — no admission needed. Multiple sessions can run simultaneously.
             </div>
 
             <div style={styles.divider} />
@@ -378,6 +333,12 @@ const Index = () => {
               </div>
             </div>
 
+            <div style={styles.fieldGroup}>
+              <label style={styles.label}>Candidate Email (optional — sends calendar invite)</label>
+              <input style={styles.input} type="email" placeholder="candidate@example.com"
+                value={candidateEmail} onChange={(e) => setCandidateEmail(e.target.value)} />
+            </div>
+
             {error && <div style={styles.error}>⚠️ {error}</div>}
 
             <button style={styles.btnPrimary} onClick={handleGeneratePersona}>
@@ -390,66 +351,27 @@ const Index = () => {
         {state === "generating" && (
           <div style={styles.spinnerWrap}>
             <div style={styles.spinner} />
-            <p style={{ color: "#fff", fontWeight: 600, margin: "0 0 0.4rem" }}>
-              Generating interview persona...
-            </p>
-            <p style={{ color: "rgba(255,255,255,0.4)", fontSize: "0.83rem", margin: 0 }}>
-              AI is crafting a structured interview plan
-            </p>
+            <p style={{ color: "#fff", fontWeight: 600, margin: "0 0 0.4rem" }}>Generating interview persona...</p>
+            <p style={{ color: "rgba(255,255,255,0.4)", fontSize: "0.83rem", margin: 0 }}>AI is crafting a structured interview plan</p>
           </div>
         )}
 
-        {/* ── PREVIEW (editable persona) ────────────────────────────────────── */}
+        {/* ── PREVIEW ───────────────────────────────────────────────────────── */}
         {state === "preview" && (
           <div style={{ animation: "fadeIn 0.35s ease-out" }}>
-            <div style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              marginBottom: "0.6rem",
-              marginTop: "0.25rem",
-            }}>
-              <div style={{
-                fontSize: "0.78rem",
-                fontWeight: 600,
-                letterSpacing: "1.2px",
-                textTransform: "uppercase" as const,
-                color: "rgba(255,255,255,0.5)",
-              }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.6rem", marginTop: "0.25rem" }}>
+              <div style={{ fontSize: "0.78rem", fontWeight: 600, letterSpacing: "1.2px", textTransform: "uppercase" as const, color: "rgba(255,255,255,0.5)" }}>
                 ✨ Generated Persona
               </div>
-              <div style={{
-                fontSize: "0.72rem",
-                color: "rgba(99,102,241,0.8)",
-                background: "rgba(99,102,241,0.1)",
-                border: "1px solid rgba(99,102,241,0.2)",
-                borderRadius: "6px",
-                padding: "0.2rem 0.5rem",
-              }}>
+              <div style={{ fontSize: "0.72rem", color: "rgba(99,102,241,0.8)", background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: "6px", padding: "0.2rem 0.5rem" }}>
                 Editable
               </div>
             </div>
-
-            <textarea
-              style={styles.textarea}
-              value={generatedPersona}
-              onChange={(e) => setGeneratedPersona(e.target.value)}
-              spellCheck={false}
-            />
-
-            <p style={styles.previewHint}>
-              Review and edit the persona above, then launch the bot.
-            </p>
-
+            <textarea style={styles.textarea} value={generatedPersona} onChange={(e) => setGeneratedPersona(e.target.value)} spellCheck={false} />
+            <p style={styles.previewHint}>Review and edit the persona above, then launch the bot. A Google Meet link will be created automatically.</p>
             {error && <div style={{ ...styles.error, marginTop: "0.75rem" }}>⚠️ {error}</div>}
-
-            <button style={styles.btnPrimary} onClick={handleLaunchBot}>
-              🚀 Launch Bot
-            </button>
-
-            <button style={styles.btnOutline} onClick={() => setState("form")}>
-              ← Edit Details
-            </button>
+            <button style={styles.btnPrimary} onClick={handleLaunchBot}>🚀 Create Meeting & Launch Bot</button>
+            <button style={styles.btnOutline} onClick={() => setState("form")}>← Edit Details</button>
           </div>
         )}
 
@@ -457,12 +379,8 @@ const Index = () => {
         {state === "launching" && (
           <div style={styles.spinnerWrap}>
             <div style={styles.spinner} />
-            <p style={{ color: "#fff", fontWeight: 600, margin: "0 0 0.4rem" }}>
-              Launching bot into your meeting...
-            </p>
-            <p style={{ color: "rgba(255,255,255,0.4)", fontSize: "0.83rem", margin: 0 }}>
-              Joining Google Meet — this may take a moment
-            </p>
+            <p style={{ color: "#fff", fontWeight: 600, margin: "0 0 0.4rem" }}>{launchStatus || "Launching..."}</p>
+            <p style={{ color: "rgba(255,255,255,0.4)", fontSize: "0.83rem", margin: 0 }}>Bot will be the host — no admission required</p>
           </div>
         )}
 
@@ -470,16 +388,28 @@ const Index = () => {
         {state === "active" && (
           <div style={styles.statusCenter}>
             <span style={styles.statusIcon}>✅</span>
-            <div style={styles.statusTitle}>Bot is live in your meeting!</div>
-            <div style={styles.statusSub}>The AI interviewer has joined and is ready.</div>
+            <div style={styles.statusTitle}>Bot is live as host!</div>
+            <div style={styles.statusSub}>Share the link below with your candidate.</div>
+
+            {/* Session ID badge — useful for debugging */}
+            {sessionId && (
+              <div style={styles.sessionBadge}>
+                Session: {sessionId.slice(0, 8)}
+              </div>
+            )}
+
+            {/* Meet link with copy button */}
+            <div style={styles.meetLinkBox}>
+              <span style={styles.meetLinkText}>{meetLink}</span>
+              <button style={styles.btnCopy} onClick={() => copyToClipboard(meetLink)}>📋 Copy</button>
+            </div>
+
             <div style={styles.infoBox}>
               <div style={styles.infoRow}><strong style={{ color: "rgba(255,255,255,0.8)" }}>Role:</strong> {targetRole} ({experienceLevel})</div>
               <div style={styles.infoRow}><strong style={{ color: "rgba(255,255,255,0.8)" }}>Type:</strong> {interviewType} · {tone} · {duration} min</div>
               <div style={styles.infoRow}><strong style={{ color: "rgba(255,255,255,0.8)" }}>Interviewer:</strong> {interviewerName}</div>
               {keyTopics && <div style={styles.infoRow}><strong style={{ color: "rgba(255,255,255,0.8)" }}>Topics:</strong> {keyTopics}</div>}
-              <div style={{ ...styles.infoRow, marginTop: "0.5rem", wordBreak: "break-all" as const }}>
-                <strong style={{ color: "rgba(255,255,255,0.8)" }}>Meet:</strong> {meetLink}
-              </div>
+              {candidateEmail && <div style={styles.infoRow}><strong style={{ color: "rgba(255,255,255,0.8)" }}>Invite sent to:</strong> {candidateEmail}</div>}
             </div>
             <button style={styles.btnExit} onClick={handleExit}>⏻ Exit Bot</button>
           </div>
@@ -489,9 +419,7 @@ const Index = () => {
         {state === "exiting" && (
           <div style={styles.spinnerWrap}>
             <div style={{ ...styles.spinner, borderTopColor: "#ef4444" }} />
-            <p style={{ color: "#fff", fontWeight: 600, margin: 0 }}>
-              Removing bot from meeting...
-            </p>
+            <p style={{ color: "#fff", fontWeight: 600, margin: 0 }}>Removing bot from meeting...</p>
           </div>
         )}
 

@@ -3,20 +3,15 @@
 realtime.py — GPT Realtime API (STT + LLM combined)
 
 Flow:
-  VirtualSpeaker.monitor (44100Hz)
+  VSpk_{sid}.monitor (44100Hz)          ← per-session speaker sink monitor
   → resample to 24000Hz PCM16
-  → RMS threshold filter (ignore quiet background noise)
-  → GPT Realtime WebSocket (STT + LLM in one shot)
+  → RMS threshold filter
+  → GPT Realtime WebSocket (STT + LLM)
   → text response
-  → agent.text_to_speech()  (Cartesia Sonic-3, streaming)
+  → agent.text_to_speech()  (Cartesia Sonic-3)
 
-VAD: semantic_vad — understands sentence completion semantically.
-     Doesn't fire on mid-sentence pauses ("uh...", "umm...").
-     Much more natural than server_vad silence-based chunking.
-
-Barge-in:
-  Client-side: RMS > BARGE_IN_RMS → agent.interrupt() → kills paplay
-  Server-side: interrupt_response=True → OpenAI cancels pending response
+FIX: PULSE_SOURCE is now read from PULSE_SPK_SINK env var (set per-session
+     by api.py) instead of being hardcoded to VirtualSpeaker.monitor.
 """
 
 import asyncio
@@ -32,10 +27,10 @@ import sounddevice as sd
 import websockets
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-CAPTURE_RATE  = 44100   # PulseAudio VirtualSpeaker rate — DO NOT CHANGE
-TARGET_RATE   = 24000   # GPT Realtime requires 24000Hz PCM16 mono
-FRAME_MS      = 30      # 30ms audio chunks
-BARGE_IN_RMS  = 0.04    # RMS threshold for barge-in detection
+CAPTURE_RATE  = 44100
+TARGET_RATE   = 24000
+FRAME_MS      = 30
+BARGE_IN_RMS  = 0.04
 
 
 def ts():
@@ -43,7 +38,6 @@ def ts():
 
 
 def _resample(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
-    """Resample mono float32 array from from_rate to to_rate."""
     if from_rate == to_rate:
         return audio
     new_len = int(len(audio) * to_rate / from_rate)
@@ -55,7 +49,6 @@ def _resample(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
 
 
 def _to_pcm16_b64(audio: np.ndarray) -> str:
-    """Convert float32 mono array → base64 PCM16 string for GPT Realtime."""
     clipped = np.clip(audio, -1.0, 1.0)
     return base64.b64encode(
         (clipped * 32767).astype(np.int16).tobytes()
@@ -69,12 +62,25 @@ async def run_realtime(
     openai_api_key: str,
     system_prompt: str,
     device_index: int = 0,
-    silence_duration_ms: int = 500,   # kept for API compat — not used by semantic_vad
+    silence_duration_ms: int = 500,
     voice_threshold: float = 0.05,
 ):
-    # CRITICAL: set PULSE_SOURCE before opening sounddevice stream
-    os.environ["PULSE_SOURCE"] = "VirtualSpeaker.monitor"
-    print(f"[RT] 🔌 PULSE_SOURCE: VirtualSpeaker.monitor", flush=True)
+    # ── FIX: resolve per-session speaker sink from env ─────────────────────
+    # api.py sets PULSE_SPK_SINK = VSpk_{sid8} for each session.
+    # We need to listen on its .monitor to capture Chrome's speaker output
+    # (= candidate's voice coming from Meet).
+    # Fallback chain: PULSE_SPK_SINK → PULSE_SOURCE → global fallback
+    spk_sink = (
+        os.getenv("PULSE_SPK_SINK")         # per-session: VSpk_2fad6aeb
+        or os.getenv("PULSE_SOURCE")         # legacy fallback
+        or "VirtualSpeaker"                  # last resort
+    )
+    # The .monitor of the speaker sink is where Chrome's audio output appears
+    pulse_source = f"{spk_sink}.monitor"
+
+    os.environ["PULSE_SOURCE"] = pulse_source
+    print(f"[RT] 🔌 PULSE_SOURCE: {pulse_source}", flush=True)
+    # ── END FIX ────────────────────────────────────────────────────────────
 
     device_info  = sd.query_devices(device_index)
     capture_rate = int(device_info.get("default_samplerate", CAPTURE_RATE))
@@ -96,7 +102,6 @@ async def run_realtime(
     audio_q = queue.Queue(maxsize=500)
     loop    = asyncio.get_event_loop()
 
-    # ── Sounddevice callback ───────────────────────────────────────────────
     def audio_callback(indata, frames, time_info, status):
         if status:
             print(f"[RT] ⚠️  {status}", flush=True)
@@ -104,7 +109,6 @@ async def run_realtime(
         mono = np.mean(indata, axis=1) if indata.ndim > 1 else indata.flatten()
 
         if mute_flag.is_set():
-            # Alex is speaking — check for barge-in only
             rms = float(np.sqrt(np.mean(np.square(mono))))
             if rms > BARGE_IN_RMS:
                 print(f"[RT] [{ts()}] ⚡ Barge-in (rms={rms:.3f}) — stopping Alex", flush=True)
@@ -117,7 +121,6 @@ async def run_realtime(
         except queue.Full:
             pass
 
-    # ── WebSocket session ──────────────────────────────────────────────────
     async with websockets.connect(
         url,
         additional_headers=headers,
@@ -126,11 +129,6 @@ async def run_realtime(
     ) as ws:
         print(f"[RT] ✅ Connected to GPT Realtime WebSocket", flush=True)
 
-        # Session config:
-        # - semantic_vad: fires when sentence is semantically complete
-        # - eagerness=high: respond as soon as sentence is done
-        # - interrupt_response=True: OpenAI cancels response on barge-in
-        # - max_response_output_tokens=80: short responses = fast TTS
         await ws.send(json.dumps({
             "type": "session.update",
             "session": {
@@ -141,28 +139,24 @@ async def run_realtime(
                     "model": "whisper-1"
                 },
                 "turn_detection": {
-                    "type": "semantic_vad",        # ← understands sentence completion
-                    "eagerness": "high",            # ← respond as soon as possible
+                    "type": "semantic_vad",
+                    "eagerness": "high",
                     "create_response": True,
-                    "interrupt_response": True,     # ← native OpenAI barge-in
+                    "interrupt_response": True,
                 },
                 "temperature": 0.8,
-                "max_response_output_tokens": 80,  # short = fast
+                "max_response_output_tokens": 80,
             }
         }))
 
-        # ── Send audio task ────────────────────────────────────────────────
         async def _send_audio():
             silence_chunk = None
-
             while True:
                 try:
                     chunk = await loop.run_in_executor(
                         None, lambda: audio_q.get(timeout=0.1)
                     )
                     resampled = _resample(chunk, capture_rate, TARGET_RATE)
-
-                    # Voice threshold filter
                     rms = float(np.sqrt(np.mean(np.square(resampled))))
                     if rms < voice_threshold:
                         if silence_chunk is None:
@@ -172,12 +166,10 @@ async def run_realtime(
                             "audio": _to_pcm16_b64(silence_chunk),
                         }))
                         continue
-
                     await ws.send(json.dumps({
                         "type": "input_audio_buffer.append",
                         "audio": _to_pcm16_b64(resampled),
                     }))
-
                 except queue.Empty:
                     await asyncio.sleep(0.01)
                 except websockets.ConnectionClosed:
@@ -186,7 +178,6 @@ async def run_realtime(
                     print(f"[RT] ❌ Send error: {e}", flush=True)
                     break
 
-        # ── Receive events task ────────────────────────────────────────────
         async def _receive_events():
             async for raw in ws:
                 try:
@@ -224,7 +215,6 @@ async def run_realtime(
                     err = event.get("error", {})
                     print(f"[RT] ❌ API error: {err.get('message', err)}", flush=True)
 
-        # ── Start stream ───────────────────────────────────────────────────
         with sd.InputStream(
             device=device_index,
             samplerate=capture_rate,
@@ -234,7 +224,7 @@ async def run_realtime(
             callback=audio_callback,
             latency="high",
         ):
-            print(f"[RT] ✅ Listening on VirtualSpeaker.monitor", flush=True)
+            print(f"[RT] ✅ Listening on {pulse_source}", flush=True)
             try:
                 await asyncio.gather(_send_audio(), _receive_events())
             except asyncio.CancelledError:
