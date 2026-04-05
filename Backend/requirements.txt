@@ -73,8 +73,13 @@ google-auth-oauthlib
 # Pillow: used by vision_diff.py for perceptual hash (average hash) frame comparison.
 # Prevents sending identical/near-identical frames to the vision model.
 Pillow>=9.0
+google-generativeai>=0.8.3
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 browser-use
 langchain-openai
 elevenlabs>=1.0.0
+
+
+
+
