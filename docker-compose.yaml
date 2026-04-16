@@ -9,8 +9,8 @@ services:
     shm_size: "2gb"
     ipc: host
     ports:
-      - "4002:8000"    # FastAPI backend
-      - "4003:6080"    # noVNC
+      - "4012:8000"    # FastAPI backend
+      - "4013:6080"    # noVNC
     environment:
       - DISPLAY=:99
       - PULSE_SERVER=unix:/var/run/pulse/native
@@ -22,7 +22,7 @@ services:
     image: nginx:alpine
     container_name: int-frontend
     ports:
-      - "4001:80"      # Frontend
+      - "4011:80"      # Frontend
     volumes:
       - ./Frontend/dist:/usr/share/nginx/html:ro
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro

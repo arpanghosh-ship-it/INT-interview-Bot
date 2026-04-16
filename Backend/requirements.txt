@@ -81,5 +81,8 @@ langchain-openai
 elevenlabs>=1.0.0
 
 
+requests
+
+
 
 
